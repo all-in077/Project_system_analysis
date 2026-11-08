@@ -1,0 +1,573 @@
+openapi: 3.0.3
+info:
+  title: OrderGuard API
+  version: 0.1.0
+  description: |
+    Контракт собственного сервиса OrderGuard поверх брокерского API (учебный проект).
+    Правила идемпотентности, состояния и ошибки описаны в документации репозитория (docs/).
+    Суммы и цены передаются строками с десятичной точкой, чтобы не терять точность.
+servers:
+  - url: https://api.orderguard.example/v1
+    description: Пример адреса (учебный)
+security:
+  - bearerAuth: []
+tags:
+  - name: Orders
+  - name: Notifications
+  - name: Credentials
+  - name: Operations
+
+paths:
+  /orders:
+    post:
+      tags: [Orders]
+      operationId: placeOrder
+      summary: Выставить заявку
+      description: |
+        Повтор запроса с тем же `Idempotency-Key` и теми же параметрами возвращает ту же заявку (200).
+        Тот же ключ с другими параметрами даёт 409. Новую заявку создаёт только новый ключ.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceOrderRequest'
+            examples:
+              limitBuy:
+                summary: Лимитная покупка
+                value:
+                  instrumentId: "BBG004730N88"
+                  direction: BUY
+                  orderType: LIMIT
+                  quantityLots: "10"
+                  price: "250.50"
+      responses:
+        '200':
+          description: Повтор того же запроса, заявка уже существует
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '202':
+          description: Заявка принята, итог может быть уточнён позже
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/BrokerUnavailable'
+    get:
+      tags: [Orders]
+      operationId: listOrders
+      summary: Список заявок пользователя
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/OrderStatus'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Страница заявок
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Order'
+                  nextCursor:
+                    type: string
+                    nullable: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /orders/{orderId}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Получить заявку
+      responses:
+        '200':
+          description: Заявка
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Orders]
+      operationId: cancelOrder
+      summary: Отменить заявку
+      description: Повтор отмены идемпотентен. Для заявки в терминальном статусе возвращается 409.
+      responses:
+        '202':
+          description: Отмена запрошена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/BrokerUnavailable'
+
+  /orders/{orderId}/replace:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Orders]
+      operationId: replaceOrder
+      summary: Заменить параметры активной заявки
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceOrderRequest'
+      responses:
+        '202':
+          description: Замена принята
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /orders/{orderId}/events:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Operations]
+      operationId: listOrderEvents
+      summary: История изменений заявки
+      responses:
+        '200':
+          description: События по возрастанию времени
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OrderEvent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /notifications:
+    get:
+      tags: [Notifications]
+      operationId: listNotifications
+      summary: Уведомления пользователя
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: Только уведомления после этого времени (UTC)
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Список уведомлений
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Notification'
+
+  /notification-settings:
+    put:
+      tags: [Notifications]
+      operationId: updateNotificationSettings
+      summary: Настроить каналы и тихие часы (после MVP)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationSettings'
+      responses:
+        '200':
+          description: Сохранено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationSettings'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /credentials:
+    put:
+      tags: [Credentials]
+      operationId: setBrokerCredential
+      summary: Сохранить токен брокера
+      description: |
+        Токен принимается один раз и сохраняется в хранилище секретов.
+        В ответах и журналах он никогда не возвращается.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetCredentialRequest'
+      responses:
+        '204':
+          description: Токен сохранён
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /health:
+    get:
+      tags: [Operations]
+      operationId: getHealth
+      summary: Состояние мониторинга и свежесть данных
+      security: []
+      responses:
+        '200':
+          description: Состояние
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID, выбираемый клиентом. Уникален в рамках пользователя.
+      schema:
+        type: string
+        format: uuid
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      description: Внутренний идентификатор заявки
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    Direction:
+      type: string
+      enum: [BUY, SELL]
+    OrderType:
+      type: string
+      enum: [LIMIT, MARKET]
+    OrderStatus:
+      type: string
+      description: Внутренние состояния, см. docs/03-order-state-machine.md
+      enum:
+        - CREATED
+        - SENDING
+        - UNCONFIRMED
+        - NEW
+        - PARTIALLY_FILLED
+        - CANCEL_REQUESTED
+        - FILLED
+        - CANCELLED
+        - REJECTED
+    DecimalString:
+      type: string
+      pattern: '^-?[0-9]+(\.[0-9]+)?$'
+      example: "250.50"
+    PlaceOrderRequest:
+      type: object
+      required: [instrumentId, direction, orderType, quantityLots]
+      properties:
+        instrumentId:
+          type: string
+          description: Идентификатор инструмента (FIGI или UID брокера)
+        direction:
+          $ref: '#/components/schemas/Direction'
+        orderType:
+          $ref: '#/components/schemas/OrderType'
+        quantityLots:
+          $ref: '#/components/schemas/DecimalString'
+        price:
+          allOf:
+            - $ref: '#/components/schemas/DecimalString'
+          description: Обязательна для LIMIT, не указывается для MARKET
+    ReplaceOrderRequest:
+      type: object
+      required: [quantityLots, price]
+      properties:
+        quantityLots:
+          $ref: '#/components/schemas/DecimalString'
+        price:
+          $ref: '#/components/schemas/DecimalString'
+    Order:
+      type: object
+      required: [id, status, instrumentId, direction, orderType, quantityLots, filledLots, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        brokerOrderId:
+          type: string
+          nullable: true
+          description: Биржевой идентификатор; пуст, пока заявка не подтверждена
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        statusMessage:
+          type: string
+          nullable: true
+          description: Человекочитаемое пояснение, например «Итог уточняется»
+        rejectReason:
+          type: string
+          nullable: true
+        instrumentId:
+          type: string
+        direction:
+          $ref: '#/components/schemas/Direction'
+        orderType:
+          $ref: '#/components/schemas/OrderType'
+        quantityLots:
+          $ref: '#/components/schemas/DecimalString'
+        price:
+          allOf:
+            - $ref: '#/components/schemas/DecimalString'
+          nullable: true
+        filledLots:
+          $ref: '#/components/schemas/DecimalString'
+        avgPrice:
+          allOf:
+            - $ref: '#/components/schemas/DecimalString'
+          nullable: true
+        dataFreshness:
+          type: object
+          description: Насколько свежи данные по заявке
+          properties:
+            lastUpdatedAt:
+              type: string
+              format: date-time
+            mayBeStale:
+              type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    OrderEvent:
+      type: object
+      required: [id, toStatus, source, occurredAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        fromStatus:
+          allOf:
+            - $ref: '#/components/schemas/OrderStatus'
+          nullable: true
+        toStatus:
+          $ref: '#/components/schemas/OrderStatus'
+        source:
+          type: string
+          enum: [USER, STREAM, RECONCILE, SYSTEM]
+        occurredAt:
+          type: string
+          format: date-time
+    Notification:
+      type: object
+      required: [id, kind, orderId, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        orderId:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [FILLED, PARTIALLY_FILLED, REJECTED, CANCELLED, CANCEL_TOO_LATE, MONITORING_DEGRADED]
+        text:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    NotificationSettings:
+      type: object
+      required: [channels]
+      properties:
+        channels:
+          type: array
+          items:
+            type: string
+            enum: [PUSH, EMAIL, MESSENGER]
+        quietHours:
+          type: string
+          nullable: true
+          description: Интервал в формате HH:MM-HH:MM в часовом поясе пользователя; критичные события не подавляются
+    SetCredentialRequest:
+      type: object
+      required: [environment, token]
+      properties:
+        environment:
+          type: string
+          enum: [SANDBOX, PRODUCTION]
+        token:
+          type: string
+          writeOnly: true
+        scope:
+          type: string
+          enum: [READ_ONLY, TRADE]
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [OK, DEGRADED]
+        streamConnected:
+          type: boolean
+        lastStreamEventAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastReconcileAt:
+          type: string
+          format: date-time
+          nullable: true
+    Error:
+      type: object
+      required: [code, message, requestId]
+      properties:
+        code:
+          type: string
+          example: IDEMPOTENCY_KEY_REUSED
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              reason:
+                type: string
+        requestId:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Некорректный запрос (IDEMPOTENCY_KEY_REQUIRED, INVALID_IDEMPOTENCY_KEY)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Нет или недействительна сессия (UNAUTHORIZED)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: У токена нет прав (TOKEN_FORBIDDEN)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Заявка не найдена (ORDER_NOT_FOUND)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Конфликт (IDEMPOTENCY_KEY_REUSED, ORDER_NOT_CANCELLABLE, ORDER_NOT_REPLACEABLE)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unprocessable:
+      description: Нарушены ограничения (VALIDATION_FAILED, NEGATIVE_PRICE_NOT_ALLOWED, ORDER_REQUIRES_CONFIRMATION)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Превышен лимит (RATE_LIMITED)
+      headers:
+        Retry-After:
+          description: Секунды до повтора
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BrokerUnavailable:
+      description: Брокер недоступен (BROKER_UNAVAILABLE)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
